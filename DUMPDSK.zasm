@@ -24,6 +24,10 @@ GETDPB:		EQU 1Fh
 ;	Etc
 FCBDRV:		EQU 5Ch
 
+MAXRETRIES:	EQU 3h
+ESC:		EQU 27
+CR:		EQU 13
+LF:		EQU 10
 
 		ORG 100h
 
@@ -51,9 +55,9 @@ FCBDRV:		EQU 5Ch
 		LD C, PRINT
 		CALL BDOS
 		LD A, (FCBDRV)
-		DEC A	; convert A-P -> 00-0Fh
+		DEC A			; convert A-P -> 00-0Fh
 		CP 10h
-		JR NC, USAGE
+		JR NC, USAGE		; Not 00-0Fh
 		
 ; Set disk
 
@@ -74,17 +78,16 @@ GETINFO:	LD C, GETDPB
 		CALL BDOS
 		PUSH HL
 		POP IX
-		LD B,0
-		LD E, (IX+0) 	; SPT -> sectors per track (cylinder)
+		LD E, (IX+0) 		; SPT -> sectors per track (cylinder)
 		LD D, (IX+1)
 		LD (NUMSPT), DE
-		LD A, (IX+3)	; BLM -> BLM+1 = sectors per block
+		LD A, (IX+3)		; BLM -> BLM+1 = sectors per block
 		ADD A, 1
 		LD (NUMSPB), A
-		LD E, (IX+5)	; DSM -> maximum block number
+		LD E, (IX+5)		; DSM -> maximum block number
 		LD D, (IX+6)
 		LD (NUMBLKS), DE 
-		LD E, (IX+13)	; OFF -> offset num tracks
+		LD E, (IX+13)		; OFF -> offset num tracks
 		LD D, (IX+14)
 		LD (NUMOFFTRK), DE
 
@@ -115,12 +118,12 @@ GETINFO:	LD C, GETDPB
 		LD C, PRINT
 		CALL BDOS
 
-; Wait for <CR>
+; Wait for user
 
 WAITCR:		LD C, GETCH
 		CALL BDOS
 
-		CP 1Bh
+		CP ESC
 		JR Z, EXIT
 
 		LD DE, MSG_START
@@ -133,13 +136,13 @@ WAITCR:		LD C, GETCH
 		LD C, SETDMA
 		CALL BDOS
 
-; Init variables
+; Init variables -- These are initialized by DB/DW
 
-		LD DE, 0
-		LD (CURTRK), DE
-		LD (CURBLK), DE
-		LD (CURADDR), DE
-		LD (CURADDRH), DE
+;		LD DE, 0
+;		LD (CURTRK), DE
+;		LD (CURBLK), DE
+;		LD (CURADDR), DE
+;		LD (CURADDRH), DE
 
 ; Loop through offset tracks - don't track block number
 
@@ -174,31 +177,35 @@ EXIT:		CALL PRT_IHEXEOF
 
 		JP RESET
 
+; FUNCTION: READTRKS
+;
 ; Read tracks function. Read until we hit the last track or last block
+;
+
 READTRKS:	
 		LD A, (NUMSPB)			; Count sect/blk
 		LD (CURSPB), A
 		LD BC, (CURTRK)
 		
 NEXTTRK:	
-		PUSH BC				; Check for a ^C or ESC at the console
+		PUSH BC				; Check for an X or ESC at the console
 		LD E, CONST
 		CALL DOBIOS
 		OR A
 		JR Z, RTNOABRT
 		LD E, CONIN
 		CALL DOBIOS
-		CP 1Bh
+		CP ESC
 		JR Z, EXIT
-		CP 3h
+		AND 5Fh				; Lower->Upper case
+		CP 'X'
 		JR Z, EXIT
 		
 RTNOABRT:
 		POP BC
 
 		PUSH BC				; DEBUG v
-		PUSH HL				; 	Print track num
-		LD HL, MSG_TRKNUM
+		LD HL, MSG_TRKNUM		; 	Print track num
 		LD A, B
 		CALL BYT2HEX
 		LD A, C
@@ -206,7 +213,6 @@ RTNOABRT:
 		LD DE, MSG_TRKNUM
 		LD C, PRINT
 		CALL BDOS
-		POP HL
 		POP BC				; DEBUG ^
 
 		LD E, SETTRK
@@ -282,51 +288,78 @@ NOBLKCNT:	LD A, (CURSEC)
 		JR NEXTSEC
 
 ;	Next track
-
 NEWTRK:		LD BC, (CURTRK)
 		INC BC
 		LD (CURTRK), BC
 
-		LD A, (CNTBLK)	; Ignore max track number for data tracks
+		LD A, (CNTBLK)		; Ignore max track number for data tracks
 		OR A
 		JP NZ, NEXTTRK
 		
-		LD DE, (NUMOFFTRK) ; Ignore max block number for offset tracks
+		LD DE, (NUMOFFTRK)	; Check if we hit the last offset track
 		CALL CMPBCDE
 		JP NZ, NEXTTRK
 
 		RET
+
+; FUNCTION: DUMPSECT
 ;
 ; Read a sector, increment addresses, output base addresses as necessary, and output ihex records
 ;
 
-DUMPSECT:	LD E, READSECT
+DUMPSECT:	
+		LD A, MAXRETRIES
+		LD (RETRYCNT), A
+DSTRYREAD:
+		LD E, READSECT
 		CALL DOBIOS
 
 		OR A
-		JR Z, DSREADOK	; If returned zero, read OK
+		JR Z, DSREADOK		; If returned zero, read OK
 
-		LD HL, (ERRCOUNT) ; Otherwise, count as error...
+		LD A, (RETRYCNT)	; Check if maxed out retries
+		DEC A
+		JR Z, DSERROUT
+		LD (RETRYCNT), A
+		
+		AND 1			; Every other attempt...
+		JR Z, DSTRYREAD
+		
+		LD E, HOME		; ... Try disk recalibration
+		CALL DOBIOS
+		LD E, SETTRK
+		LD BC, (CURTRK)
+		CALL DOBIOS
+		JR DSTRYREAD
+
+DSERROUT:
+		LD HL, (ERRCOUNT) 	; Otherwise, count as error...
 		INC HL
 		LD (ERRCOUNT), HL
 
-		LD HL, DMAADDR	; ... and fill memory with junk so we aren't confused with stale data
+		LD HL, DMAADDR		; ... and fill memory with pattern so we aren't confused with stale data
 		LD B, 80h
 		LD A, 69h
 DSFILL:		LD (HL), A
 		INC HL
 		DJNZ DSFILL
 
-DSREADOK:	LD IX, DMAADDR 	; Set up IX for sector processing loop below
+DSREADOK:	LD IX, DMAADDR 		; Set up IX for sector processing loop below
 
-		LD DE, (CURADDR) ; If address low 16b = 0, print base record
+		LD DE, (CURADDR) 	; If address low 16b = 0, print base record
 		LD A, D
 		OR E
 		JR NZ, DSRECLOOP
 
-		; Print base record 
+; Print base record 
+					; Intel HEX base record
 
-		LD HL, IHEXBASEADR ;Address
+					; :02000004 -- sor, 2 bytes, no addr, type 4
+					; efgh -- upper 16b of address
+					; cc -- checksum
+
+;	Address
+		LD HL, IHEXBASEADR
 		LD A, (CURADDRH+1)
 		LD B, A
 		CALL BYT2HEX
@@ -334,57 +367,75 @@ DSREADOK:	LD IX, DMAADDR 	; Set up IX for sector processing loop below
 		LD C, A
 		CALL BYT2HEX
 
-		; Compute checksum
+; 	Compute checksum
 		LD A, 0h
 		SUB 6h
 		SUB B
 		SUB C
 		CALL BYT2HEX
 
+;	Print it
 		LD DE, IHEXBASE
 		LD C, PRINT
 		CALL BDOS
 
-		; Loop for ihex rec num 0-7
-		; Process one rec = 10h bytes
-DSRECLOOP:	LD B, 10h
+DSRECLOOP:
+; Loop for ihex rec num 0-7
+					; Intel HEX data record
 
-		; Fill in address
+					; :10  -- sor, 16 bytes
+					; abcd -- address
+					; 00 - data record
+					; xx -- repeat 16x for data
+					; cc -- checksum, 0-(sum of data bytes)
+
+		
+		LD B, 10h		; Process one rec = 10h bytes
+
+; Address
 		LD HL, IHEXDATAADR	
 		LD A, (CURADDR+1)
 		CALL BYT2HEX
 		LD A, (CURADDR)
 		CALL BYT2HEX
 
-		; Fill in data from DMAADDR buffer
+; Fill in data from DMAADDR buffer
 		LD HL, IHEXDATADATA
-DSONEBYTE:	LD A, (IX+0)
+
+DSONEBYTE:	
+		LD A, (IX+0)
 		CALL BYT2HEX
 		INC IX
 		DJNZ DSONEBYTE
 
-		; Compute checksum
-DSCOMPCKSUM:	LD A, 0		; Subtract from 0
-		SUB 10h		; Record data size
-		LD DE, (CURADDR) ; Record address bytes
+; Compute checksum
+DSCOMPCKSUM:	
+		LD A, 0			; Subtract from 0
+		SUB 10h			; Record data size
+		LD DE, (CURADDR)	 ; Record address bytes
 		SUB D
 		SUB E
-		; SUB 0		; Record type (00)
-		LD BC, -10h	; Reset IX to beginning of data
+		; SUB 0			; Record type (00)
+		LD BC, -10h		; Reset IX to beginning of data
 		ADD IX, BC
 		LD B, 10h
-DSSUBCKSUMLP:	LD C, (IX+0)	; Loop through data bytes
+
+;	Loop through data bytes
+DSSUBCKSUMLP:
+		LD C, (IX+0)
 		SUB C
 		INC IX
 		DJNZ DSSUBCKSUMLP
-		; Checksum is in A, checksum string addr in HL still
+
+;	Checksum is in A, checksum string addr in HL still
 		CALL BYT2HEX
 
-		LD DE, IHEXDATA	;Ship it!
+; Ship it!
+		LD DE, IHEXDATA
 		LD C, PRINT
 		CALL BDOS
 
-		; 32b add bytes processed
+; 32b add for bytes processed
 		LD B, 0
 		LD C, 10h
 		LD HL, (CURADDR)
@@ -395,15 +446,15 @@ DSSUBCKSUMLP:	LD C, (IX+0)	; Loop through data bytes
 		ADC HL, BC
 		LD (CURADDRH), HL
 
-		; If bytes & 70h NZ, do next block of data
+; Loop through prints until we get a whole sector ( ADDR & 70h == 0 )
 		LD A, (CURADDR)
 		AND 70h
 		JR NZ,DSRECLOOP
 
-		; Done with this sector
+; Done with this sector
 		RET
 
-
+; FUNCTION: DOBIOS
 ;
 ; Call the BIOS, use BIOS addr plus offset in E.
 ;
@@ -413,6 +464,7 @@ DOBIOS:		LD HL, (BIOS)
 		ADD HL, DE
 		JP (HL)
 
+; FUNCTION: CMPBCDE
 ;
 ; Compare BC to DE
 ;
@@ -424,6 +476,7 @@ CMPBCDE:	LD A, D
 		CP C
 		RET
 
+; FUNCTION: D2HEX
 ;
 ; Digit to HEX Function - digit in low bits of A, return value in A, only affects A/F
 ;
@@ -435,6 +488,7 @@ D2HEX:		AND 0Fh
 		ADD A,7
 		RET
 
+; FUNCTION: BYT2HEX
 ;
 ; Byte to HEX Function - digit in A, write to (HL). Increments HL, only affects A/F
 ;
@@ -454,21 +508,10 @@ BYT2HEX:	PUSH AF
 		RET
 
 
-; Intel HEX base function:
-
-; :02000004 -- sor, 2 bytes, no addr, type 4
-; efgh -- upper 16b of address
-; cc -- checksum
-
-; Intel HEX print fuction:
-
-; :10  -- sor, 16 bytes
-; abcd -- address
-; 00 - data record
-; xx -- repeat 16x for data
-; cc -- checksum, 0-(sum of data bytes)
-
+; FUNCTION: PRT_IHEXEOF
+;
 ; Intel HEX EOF
+;
 
 PRT_IHEXEOF:	LD DE, IHEXEOF
 		LD C, PRINT
@@ -486,6 +529,7 @@ NUMBLKS:	dw	0
 NUMSPB:		db	0
 
 ERRCOUNT:	dw	0
+RETRYCNT:	db	0
 
 CURTRK:		dw	0
 CURSEC:		db	0
@@ -509,20 +553,20 @@ IHEXDATACKS:	db	'F0\r\n$'
 IHEXEOF:	db	':00000001FF\r\n$'
 
 MSG_USAGE:	db	'USAGE: DUMPDSK A: <- Dump drive A\r\n$'
-MSG_WELCOME:	db	'CP/M disk dumper program. Dumps disk contents in intel HEX format.\r\n'
+MSG_WELCOME:	db	'CP/M disk dumper program. Dumps disk as Intel HEX.\r\n'
 		db	'Copyright 2023 Patrick Finnegan, GPL V2 License.\r\n$'
 
-MSG_DISKINFO:	db	'Disk geometry detected: '
-MSG_DIBLKS:	db	'0000h Blocks '
-MSG_DISPB:	db	'00h rec/Block '
-MSG_DISPT:	db	'00h SPT '
-MSG_DIOFF:	db	'0000h Offset tracks\r\n'
+MSG_DISKINFO:	db	'Disk geometry: '
+MSG_DIBLKS:	db	'0000h blks, '
+MSG_DISPB:	db	'00h sec/blk, '
+MSG_DISPT:	db	'00h Sec/trk, '
+MSG_DIOFF:	db	'0000h offset trks\r\n'
 		db	'Press CR to dump or ESC to exit: $'
 
-MSG_START:	db	'\r\nStarting dump. Press ESC or ^C to abort.\r\n$'
+MSG_START:	db	'\r\nESC or X to abort at next track.\r\n$'
 
-MSG_ERRS:	db	'Read finished. '
-MSG_ERRSNUM:	db	'0000h blocks with errors.\r\n$'
+MSG_ERRS:	db	'Finished. '
+MSG_ERRSNUM:	db	'0000h sec with errors.\r\n$'
 
 MSG_DRIVEX:	db	'Drive '
 MSG_DRIVEXDRV:	db	'X \r\n$'
