@@ -1,0 +1,33 @@
+Dump the whole disk:
+
+Using minicom, add a slower option for transfering the HEX file:
+^AO -> Configure minicom
+-> File transfer protocols
+-> Add a new one matching:
+
+name: ascii-slow 
+command: ascii-xfr -snev -c7
+options: Y    U    N       Y       N
+(all options are defaults except MULTI=N has no default)
+
+Save this.
+
+Transfer dumper .hex file to host:
+
+A> PIP DUMPDSK.HEX=CON:
+
+Transfer the file using ^As and the new ascii-slow option.
+
+A> LOAD DUMPDSK
+
+The way that disk partitions work, you only have to do this for the last
+disk partition. This is probably "C" on the 816 with a "20M" drive. On
+the 816/40 it is probably "D".  On an 806(/20) it is probably "B".
+
+Log the output of the follow command (^Al in minicom)
+
+A> DUMPDSK C
+
+The output can be converted back to an image file:
+grep ^: output.log > image.hex
+objcopy -Iihex -Obinary image.hex image.bin
