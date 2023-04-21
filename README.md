@@ -6,9 +6,12 @@ it's just DUMPDSK, but I hope to expand it to more.
 ## File types
 
 Makefile is a GNU Makefile which will build the .hex and .bin files
-X.hex is the Intel HEX format version of the executable as built by me.
-X.zasm is the Z80 assembly source code.
-X.readme is more detailed instructions on how to use the program.
+
+`X.hex` is the Intel HEX format version of the executable as built by me.
+
+`X.zasm` is the Z80 assembly source code.
+
+`X.readme` is more detailed instructions on how to use the program.
 
 ## Building code
 
